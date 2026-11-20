@@ -1,0 +1,7 @@
+name = "siridev-email-forwarder"
+main = "src/index.ts"
+compatibility_date = "2025-05-01"
+
+# Set these two secrets via Wrangler before deploying:
+#   bunx wrangler secret put WEBHOOK_URL       (e.g. https://mail.siridev.me/api/webhook/email)
+#   bunx wrangler secret put WEBHOOK_SECRET    (must match WEBHOOK_SECRET in your Next.js app)
