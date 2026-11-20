@@ -1,6 +1,7 @@
 name = "siridev-email-forwarder"
 main = "src/index.ts"
 compatibility_date = "2025-05-01"
+workers_dev = false
 
 # Set these two secrets via Wrangler before deploying:
 #   bunx wrangler secret put WEBHOOK_URL       (e.g. https://mail.siridev.me/api/webhook/email)
