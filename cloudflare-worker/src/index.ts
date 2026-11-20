@@ -21,11 +21,14 @@ export default {
       receivedAt: Date.now(),
     };
 
-    const res = await fetch(env.WEBHOOK_URL, {
+    const webhookUrl = (env.WEBHOOK_URL || "").trim();
+    const webhookSecret = (env.WEBHOOK_SECRET || "").trim();
+
+    const res = await fetch(webhookUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "x-webhook-secret": env.WEBHOOK_SECRET,
+        "x-webhook-secret": webhookSecret,
       },
       body: JSON.stringify(payload),
     });
