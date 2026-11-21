@@ -2,12 +2,15 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  AlertTriangle,
+  ArrowLeft,
   Check,
   Copy,
   Inbox,
   KeyRound,
   Lock,
   Mail,
+  Menu,
   Plus,
   RefreshCw,
   Search,
@@ -25,6 +28,11 @@ interface AppConfig {
   devSimulateEnabled: boolean;
   storageMode: string;
 }
+
+type ConfirmDialogState =
+  | { type: "delete-email"; email: StoredEmail }
+  | { type: "clear-inbox"; inboxLabel: string; count: number }
+  | null;
 
 const STORAGE_INBOXES_KEY = "siridev_mail_saved_inboxes_v1";
 const STORAGE_ACTIVE_KEY = "siridev_mail_active_inbox_v1";
@@ -58,6 +66,15 @@ const NOUNS = [
   "ridge",
   "comet",
 ];
+const AVATAR_COLORS = [
+  "#4f46e5",
+  "#0891b2",
+  "#059669",
+  "#d97706",
+  "#7c3aed",
+  "#db2777",
+  "#2563eb",
+];
 
 function generateRandomAddress(domain: string): string {
   const adj = ADJECTIVES[Math.floor(Math.random() * ADJECTIVES.length)];
@@ -68,13 +85,26 @@ function generateRandomAddress(domain: string): string {
 
 function formatRelativeTime(timestamp: number): string {
   const diffSec = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
-  if (diffSec < 60) return "just now";
-  if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`;
-  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h ago`;
+  if (diffSec < 60) return "now";
+  if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m`;
+  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h`;
   return new Date(timestamp).toLocaleDateString(undefined, {
     month: "short",
     day: "numeric",
   });
+}
+
+function getAvatarMeta(nameOrEmail: string): { initial: string; color: string } {
+  const clean = nameOrEmail.trim();
+  const initial = (clean[0] || "?").toUpperCase();
+  let hash = 0;
+  for (let i = 0; i < clean.length; i++) {
+    hash = (hash * 31 + clean.charCodeAt(i)) >>> 0;
+  }
+  return {
+    initial,
+    color: AVATAR_COLORS[hash % AVATAR_COLORS.length],
+  };
 }
 
 export default function MailClient() {
@@ -98,6 +128,12 @@ export default function MailClient() {
   const [isSimulating, setIsSimulating] = useState<boolean>(false);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
 
+  // Mobile drawer & delete confirmation states
+  const [drawerOpen, setDrawerOpen] = useState<boolean>(false);
+  const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState>(null);
+  const [clearConfirmText, setClearConfirmText] = useState<string>("");
+  const [isDeleting, setIsDeleting] = useState<boolean>(false);
+
   const authHeaders = useCallback(
     (code?: string): HeadersInit => {
       const token = code ?? passcode;
@@ -111,7 +147,9 @@ export default function MailClient() {
     const storedPass = sessionStorage.getItem(STORAGE_PASSCODE_KEY) ?? "";
     setPasscode(storedPass);
 
-    fetch("/api/config", { headers: storedPass ? { "x-passcode": storedPass } : {} })
+    fetch("/api/config", {
+      headers: storedPass ? { "x-passcode": storedPass } : {},
+    })
       .then((res) => res.json())
       .then((cfg: AppConfig) => {
         setConfig(cfg);
@@ -133,7 +171,7 @@ export default function MailClient() {
         if (lastActive && (lastActive === "all" || parsed.includes(lastActive))) {
           setActiveInbox(lastActive);
         } else {
-          setActiveInbox(parsed[0]);
+          setActiveInbox("all");
         }
       })
       .catch(() => {
@@ -151,6 +189,7 @@ export default function MailClient() {
     localStorage.setItem(STORAGE_ACTIVE_KEY, addr);
     setSelectedId(null);
     setSelectedEmail(null);
+    setDrawerOpen(false);
   };
 
   const fetchMailData = useCallback(
@@ -256,34 +295,43 @@ export default function MailClient() {
     }
   };
 
-  const handleDeleteEmail = async (id: string) => {
-    const res = await fetch(`/api/emails/${encodeURIComponent(id)}`, {
-      method: "DELETE",
-      headers: authHeaders(),
-    });
-    if (res.ok) {
-      setEmails((prev) => prev.filter((e) => e.id !== id));
-      if (selectedId === id) {
-        setSelectedId(null);
-        setSelectedEmail(null);
+  const executeConfirmedDelete = async () => {
+    if (!confirmDialog) return;
+    setIsDeleting(true);
+    try {
+      if (confirmDialog.type === "delete-email") {
+        const id = confirmDialog.email.id;
+        const res = await fetch(`/api/emails/${encodeURIComponent(id)}`, {
+          method: "DELETE",
+          headers: authHeaders(),
+        });
+        if (res.ok) {
+          setEmails((prev) => prev.filter((e) => e.id !== id));
+          if (selectedId === id) {
+            setSelectedId(null);
+            setSelectedEmail(null);
+          }
+          await fetchMailData(true);
+        }
+      } else if (confirmDialog.type === "clear-inbox") {
+        const res = await fetch(
+          `/api/emails?recipient=${encodeURIComponent(activeInbox)}`,
+          {
+            method: "DELETE",
+            headers: authHeaders(),
+          }
+        );
+        if (res.ok) {
+          setEmails([]);
+          setSelectedId(null);
+          setSelectedEmail(null);
+          await fetchMailData(true);
+        }
       }
-      fetchMailData(true);
-    }
-  };
-
-  const handleClearInbox = async () => {
-    const res = await fetch(
-      `/api/emails?recipient=${encodeURIComponent(activeInbox)}`,
-      {
-        method: "DELETE",
-        headers: authHeaders(),
-      }
-    );
-    if (res.ok) {
-      setEmails([]);
-      setSelectedId(null);
-      setSelectedEmail(null);
-      fetchMailData(true);
+      setConfirmDialog(null);
+      setClearConfirmText("");
+    } finally {
+      setIsDeleting(false);
     }
   };
 
@@ -382,20 +430,34 @@ export default function MailClient() {
   }
 
   const displayAddress =
-    activeInbox === "all" ? `*@${config.domain} (All Catch-All Mail)` : activeInbox;
+    activeInbox === "all" ? `All Mail (*@${config.domain})` : activeInbox;
+  const copyTarget =
+    activeInbox === "all" ? savedInboxes[0] || `inbox@${config.domain}` : activeInbox;
+  const isMobileReading = Boolean(selectedId);
 
   return (
     <div className="shell">
       {/* Top Bar */}
       <header className="topbar">
-        <div className="brand">
-          <div className="brand-icon">
-            <Mail size={16} />
+        <div className="topbar-left">
+          <button
+            type="button"
+            className="btn btn-icon btn-ghost mobile-only"
+            aria-label="Open mailboxes menu"
+            onClick={() => setDrawerOpen(true)}
+          >
+            <Menu size={18} />
+          </button>
+          <div className="brand">
+            <div className="brand-icon">
+              <Mail size={16} />
+            </div>
+            <span>SiriDev Mail</span>
+            <span className="brand-domain mono">@{config.domain}</span>
           </div>
-          <span>SiriDev Mail</span>
-          <span className="brand-domain mono">@{config.domain}</span>
         </div>
 
+        {/* Desktop Address Bar */}
         <div className="address-bar">
           <span className="address-value mono" title={displayAddress}>
             {displayAddress}
@@ -424,7 +486,7 @@ export default function MailClient() {
           {config.devSimulateEnabled && (
             <button
               type="button"
-              className="btn"
+              className="btn desktop-only"
               onClick={handleSimulateEmail}
               disabled={isSimulating}
               title="Send a simulated OTP email to test locally"
@@ -441,22 +503,76 @@ export default function MailClient() {
             title="Refresh inbox"
           >
             <RefreshCw size={14} />
-            Refresh
+            <span className="desktop-only">Refresh</span>
           </button>
         </div>
       </header>
 
-      {/* 3-Pane Workspace */}
-      <div className="workspace">
-        {/* Sidebar: Inboxes */}
-        <aside className="sidebar">
+      {/* Mobile Active Address Strip (shown only on mobile when viewing inbox list) */}
+      {!isMobileReading && (
+        <div className="mobile-address-strip">
+          <button
+            type="button"
+            className="mobile-address-pill"
+            onClick={() => handleCopy(copyTarget, "mobile-addr")}
+            title="Tap to copy email address"
+          >
+            <span className="mobile-address-text mono">
+              {activeInbox === "all" ? `All Mail • ${copyTarget}` : activeInbox}
+            </span>
+            {copiedKey === "mobile-addr" ? (
+              <Check size={14} style={{ color: "#86efac", flexShrink: 0 }} />
+            ) : (
+              <Copy size={14} style={{ color: "var(--text-muted)", flexShrink: 0 }} />
+            )}
+          </button>
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={handleGenerateRandom}
+            title="Generate new random email"
+          >
+            <Shuffle size={14} />
+            New
+          </button>
+        </div>
+      )}
+
+      {/* 3-Pane Workspace (Desktop) / Drawer + Master-Detail (Mobile) */}
+      <div className={`workspace ${isMobileReading ? "mobile-reading" : ""}`}>
+        {/* Mobile Drawer Backdrop */}
+        <div
+          className={`drawer-backdrop ${drawerOpen ? "open" : ""}`}
+          onClick={() => setDrawerOpen(false)}
+          aria-hidden="true"
+        />
+
+        {/* Sidebar / Mobile Mailboxes Drawer */}
+        <aside className={`sidebar ${drawerOpen ? "open" : ""}`}>
+          <div className="sidebar-mobile-header">
+            <div className="brand">
+              <div className="brand-icon">
+                <Mail size={15} />
+              </div>
+              <span>Mailboxes</span>
+            </div>
+            <button
+              type="button"
+              className="btn btn-icon btn-ghost"
+              aria-label="Close mailboxes menu"
+              onClick={() => setDrawerOpen(false)}
+            >
+              <X size={17} />
+            </button>
+          </div>
+
           <div className="sidebar-section">
             <div className="sidebar-label">Create Custom Alias</div>
             <form className="custom-form" onSubmit={handleCreateCustom}>
               <input
                 type="text"
                 className="input mono"
-                placeholder={`alias`}
+                placeholder="alias"
                 value={customPrefix}
                 onChange={(e) => setCustomPrefix(e.target.value)}
                 aria-label="Custom alias prefix"
@@ -477,7 +593,10 @@ export default function MailClient() {
               className={`inbox-item ${activeInbox === "all" ? "active" : ""}`}
               onClick={() => selectInbox("all")}
             >
-              <Inbox size={15} style={{ color: "var(--text-muted)", flexShrink: 0 }} />
+              <Inbox
+                size={15}
+                style={{ color: "var(--text-muted)", flexShrink: 0 }}
+              />
               <span className="inbox-item-name">All Mail (*@{config.domain})</span>
               {totalUnread > 0 && (
                 <span className="badge badge-unread">{totalUnread}</span>
@@ -498,7 +617,8 @@ export default function MailClient() {
                 role="button"
                 tabIndex={0}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") selectInbox(item.address);
+                  if (e.key === "Enter" || e.key === " ")
+                    selectInbox(item.address);
                 }}
               >
                 <span className="inbox-item-name mono" title={item.address}>
@@ -514,7 +634,7 @@ export default function MailClient() {
                     <button
                       type="button"
                       className="remove-inbox-btn"
-                      title="Remove from saved list"
+                      title="Hide from saved list (emails are kept)"
                       onClick={(e) => {
                         e.stopPropagation();
                         handleRemoveSavedInbox(item.address);
@@ -537,7 +657,7 @@ export default function MailClient() {
               <input
                 type="text"
                 className="input search-input"
-                placeholder="Search subject, sender, OTP…"
+                placeholder="Search mail, sender, OTP…"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
               />
@@ -546,8 +666,15 @@ export default function MailClient() {
               <button
                 type="button"
                 className="btn btn-icon btn-ghost"
-                title="Clear messages in this inbox"
-                onClick={handleClearInbox}
+                title="Clear inbox (requires confirmation)"
+                onClick={() => {
+                  setClearConfirmText("");
+                  setConfirmDialog({
+                    type: "clear-inbox",
+                    inboxLabel: displayAddress,
+                    count: emails.length,
+                  });
+                }}
               >
                 <Trash2 size={14} />
               </button>
@@ -568,45 +695,58 @@ export default function MailClient() {
                 </p>
               </div>
             ) : (
-              emails.map((email) => (
-                <button
-                  key={email.id}
-                  type="button"
-                  className={`message-row ${
-                    selectedId === email.id ? "selected" : ""
-                  }`}
-                  onClick={() => setSelectedId(email.id)}
-                >
-                  <div className="message-row-top">
-                    <span className="message-sender">
-                      {!email.isRead && <span className="unread-dot" />}
-                      {email.senderName || email.sender}
-                    </span>
-                    <span className="message-time">
-                      {formatRelativeTime(email.receivedAt)}
-                    </span>
-                  </div>
-                  <div className="message-subject">{email.subject}</div>
-                  <div className="message-meta-row">
-                    <span className="message-to mono">to {email.recipient}</span>
-                    {email.otpCode && (
-                      <span
-                        className="otp-pill mono"
-                        title="Click to copy OTP code"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleCopy(email.otpCode, `otp-${email.id}`);
-                        }}
-                      >
-                        <KeyRound size={11} />
-                        {copiedKey === `otp-${email.id}`
-                          ? "Copied!"
-                          : email.otpCode}
-                      </span>
-                    )}
-                  </div>
-                </button>
-              ))
+              emails.map((email) => {
+                const avatar = getAvatarMeta(email.senderName || email.sender);
+                return (
+                  <button
+                    key={email.id}
+                    type="button"
+                    className={`message-row ${
+                      selectedId === email.id ? "selected" : ""
+                    } ${!email.isRead ? "unread" : ""}`}
+                    onClick={() => setSelectedId(email.id)}
+                  >
+                    <div
+                      className="sender-avatar"
+                      style={{ backgroundColor: avatar.color }}
+                    >
+                      {avatar.initial}
+                    </div>
+                    <div className="message-content">
+                      <div className="message-row-top">
+                        <span className="message-sender">
+                          {!email.isRead && <span className="unread-dot" />}
+                          {email.senderName || email.sender}
+                        </span>
+                        <span className="message-time">
+                          {formatRelativeTime(email.receivedAt)}
+                        </span>
+                      </div>
+                      <div className="message-subject">{email.subject}</div>
+                      <div className="message-meta-row">
+                        <span className="message-to mono">
+                          to {email.recipient}
+                        </span>
+                        {email.otpCode && (
+                          <span
+                            className="otp-pill mono"
+                            title="Tap to copy OTP code"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleCopy(email.otpCode, `otp-${email.id}`);
+                            }}
+                          >
+                            <KeyRound size={11} />
+                            {copiedKey === `otp-${email.id}`
+                              ? "Copied!"
+                              : email.otpCode}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  </button>
+                );
+              })
             )}
           </div>
         </section>
@@ -635,13 +775,46 @@ export default function MailClient() {
             </div>
           ) : (
             <>
+              {/* Mobile Back Bar */}
+              <div className="reader-mobile-nav">
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  onClick={() => {
+                    setSelectedId(null);
+                    setSelectedEmail(null);
+                  }}
+                >
+                  <ArrowLeft size={16} />
+                  Inbox
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-danger"
+                  onClick={() =>
+                    setConfirmDialog({
+                      type: "delete-email",
+                      email: selectedEmail,
+                    })
+                  }
+                >
+                  <Trash2 size={14} />
+                  Delete
+                </button>
+              </div>
+
               <div className="reader-header">
                 <div className="reader-title-row">
                   <h2 className="reader-subject">{selectedEmail.subject}</h2>
                   <button
                     type="button"
-                    className="btn btn-danger"
-                    onClick={() => handleDeleteEmail(selectedEmail.id)}
+                    className="btn btn-danger desktop-only"
+                    onClick={() =>
+                      setConfirmDialog({
+                        type: "delete-email",
+                        email: selectedEmail,
+                      })
+                    }
                   >
                     <Trash2 size={14} />
                     Delete
@@ -680,7 +853,9 @@ export default function MailClient() {
                     <button
                       type="button"
                       className="btn btn-success"
-                      onClick={() => handleCopy(selectedEmail.otpCode, "reader-otp")}
+                      onClick={() =>
+                        handleCopy(selectedEmail.otpCode, "reader-otp")
+                      }
                     >
                       {copiedKey === "reader-otp" ? (
                         <Check size={14} />
@@ -738,6 +913,106 @@ export default function MailClient() {
           )}
         </main>
       </div>
+
+      {/* Delete Protection Confirmation Modal */}
+      {confirmDialog && (
+        <div
+          className="modal-backdrop"
+          onClick={() => {
+            if (!isDeleting) {
+              setConfirmDialog(null);
+              setClearConfirmText("");
+            }
+          }}
+        >
+          <div
+            className="modal-card"
+            role="dialog"
+            aria-modal="true"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="modal-header">
+              <div className="modal-icon-danger">
+                <AlertTriangle size={18} />
+              </div>
+              <h3 className="modal-title">
+                {confirmDialog.type === "delete-email"
+                  ? "Delete email permanently?"
+                  : "Clear entire inbox?"}
+              </h3>
+            </div>
+
+            {confirmDialog.type === "delete-email" ? (
+              <>
+                <p className="modal-desc">
+                  This message will be permanently removed and cannot be
+                  recovered.
+                </p>
+                <div className="modal-subject-box">
+                  <strong>{confirmDialog.email.subject}</strong>
+                  <div
+                    style={{
+                      fontSize: 12,
+                      color: "var(--text-muted)",
+                      marginTop: 4,
+                    }}
+                  >
+                    From: {confirmDialog.email.senderName || confirmDialog.email.sender}
+                  </div>
+                </div>
+              </>
+            ) : (
+              <>
+                <p className="modal-desc">
+                  This will permanently delete all{" "}
+                  <strong>{confirmDialog.count}</strong> email
+                  {confirmDialog.count === 1 ? "" : "s"} in{" "}
+                  <span className="mono">{confirmDialog.inboxLabel}</span>. Type{" "}
+                  <strong className="mono">CLEAR</strong> below to confirm.
+                </p>
+                <input
+                  type="text"
+                  className="input mono"
+                  placeholder="Type CLEAR to confirm"
+                  value={clearConfirmText}
+                  onChange={(e) => setClearConfirmText(e.target.value)}
+                  autoFocus
+                />
+              </>
+            )}
+
+            <div className="modal-actions">
+              <button
+                type="button"
+                className="btn"
+                disabled={isDeleting}
+                onClick={() => {
+                  setConfirmDialog(null);
+                  setClearConfirmText("");
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn btn-danger-solid"
+                disabled={
+                  isDeleting ||
+                  (confirmDialog.type === "clear-inbox" &&
+                    clearConfirmText.trim().toUpperCase() !== "CLEAR")
+                }
+                onClick={executeConfirmedDelete}
+              >
+                {isDeleting
+                  ? "Deleting…"
+                  : confirmDialog.type === "delete-email"
+                  ? "Delete Permanently"
+                  : "Clear All Emails"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
